@@ -1,0 +1,2 @@
+"""MatAltMag GNN wrappers."""
+
