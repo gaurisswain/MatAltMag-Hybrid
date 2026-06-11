@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mataltmag-hybrid"
+version = "0.1.0"
+description = "Hybrid MatAltMag altermagnet candidate ranking pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "PyYAML",
+  "scikit-learn",
+  "joblib",
+]
+
+[project.optional-dependencies]
+materials = ["pymatgen", "mp-api", "pyarrow"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+

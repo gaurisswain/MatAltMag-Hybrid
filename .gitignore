@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Large or external scientific artifacts
+external/MatAltMag/*
+!external/MatAltMag/.gitkeep
+data/raw/**
+!data/raw/
+!data/raw/mataltmag/
+!data/raw/mataltmag/cifs/
+!data/raw/materials_project/
+results/models/
+results/dft/**/POTCAR
+

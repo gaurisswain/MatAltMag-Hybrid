@@ -1,0 +1,20 @@
+name: mataltmag-hybrid
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - pyarrow
+  - scikit-learn
+  - pyyaml
+  - joblib
+  - pytest
+  - pip:
+      - pymatgen
+      - mp-api
+      - matminer
+      - shap
+      - umap-learn
+
