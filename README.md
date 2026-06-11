@@ -1,26 +1,286 @@
 # MatAltMag-Hybrid: Hybrid Altermagnet Classifier
 
-A reproducible research codebase for extending Gao et al.'s MatAltMag model with explicit symmetry and composition features, re-ranking unconfirmed altermagnet candidates, and preparing top candidates for DFT validation.
+A reproducible research codebase extending Gao et al.'s MatAltMag GNN with
+explicit symmetry and composition features, re-ranking unconfirmed altermagnet
+candidates and preparing top candidates for DFT validation.
 
-## 1. Project goal
+---
+
+## Table of Contents
+
+1. [Project Goal](#1-project-goal)
+2. [Scientific Objective](#2-scientific-objective)
+3. [How the Models Work — Plain English](#3-how-the-models-work--plain-english)
+4. [Repository Layout](#4-repository-layout)
+5. [Environment](#5-environment)
+6. [Data Contract](#6-data-contract)
+7. [Pipeline](#7-pipeline)
+8. [DFT Validation](#8-dft-validation)
+9. [Key Fixes and Design Decisions](#9-key-fixes-and-design-decisions)
+10. [Final DFT Candidates](#10-final-dft-candidates)
+11. [Report Outputs](#11-report-outputs)
+12. [Reproducibility Checklist](#12-reproducibility-checklist)
+13. [Citation Note](#13-citation-note)
+
+---
+
+## 1. Project Goal
 
 Build a hybrid altermagnet classifier that combines:
 
-1. A frozen/pre-trained MatAltMag GNN encoder used as a black-box crystal-structure feature extractor.
-2. Explicit handcrafted features from crystal symmetry, magnetic-element composition, stoichiometry, and Materials Project stability metadata.
+1. A frozen pre-trained MatAltMag GNN encoder used as a black-box crystal
+   structure feature extractor.
+2. Explicit handcrafted features from crystal symmetry, magnetic-element
+   composition, stoichiometry, and Materials Project stability metadata.
 
-The model outputs two scores for each unconfirmed candidate:
+The model outputs two scores per candidate:
 
 - `gnn_probability`: original MatAltMag probability.
-- `hybrid_probability`: ensemble probability from frozen GNN embedding plus explicit features.
+- `hybrid_probability`: ensemble probability from frozen GNN embedding plus
+  explicit features.
 
-The final deliverable is a ranked candidate CSV and DFT validation package for the top two or three candidates.
+The final deliverable is a ranked candidate CSV and DFT validation package
+for the top candidates, filtered by physical symmetry constraints.
 
-## 2. Scientific objective
+---
 
-The project tests whether explicit physics-inspired descriptors improve few-shot altermagnet discovery beyond the published GNN classifier. If the hybrid model improves held-out performance, use it to prioritize candidates for DFT. If it does not improve performance, pivot to interpretability: explain what the published GNN has learned using embeddings, surrogate models, SHAP/permutation importance, and chemical-family analysis.
+## 2. Scientific Objective
 
-## 3. Repository layout
+Test whether explicit physics-inspired descriptors improve few-shot altermagnet
+discovery beyond the published GNN classifier.
+
+- If the hybrid model improves held-out performance: use it to prioritise
+  candidates for DFT.
+- If performance is statistically indistinguishable: pivot to interpretability —
+  explain what the GNN has learned using embeddings, SHAP, and chemical-family
+  analysis.
+
+Altermagnetism requires two magnetic sublattices related by a crystal rotation
+(not inversion). This symmetry constraint is enforced as a hard filter at the
+candidate selection stage using the space group number.
+
+---
+
+## 3. How the Models Work — Plain English
+
+This section explains each component of the pipeline in order, so each model
+can be pointed to and explained independently.
+
+### 3.1 The Original GNN — MatAltMag (Gao et al.)
+
+**What it is:** A Crystal Graph Neural Network (CGNN) trained to classify
+materials as altermagnetic or not.
+
+**How it works:** A crystal is represented as a graph where atoms are nodes
+and bonds are edges. The network passes information between neighbouring atoms
+through several convolutional layers. After several rounds of message passing,
+a pooling operation compresses the entire crystal into a single fixed-length
+vector — a numerical fingerprint of the structure. A small classification head
+then converts this fingerprint into a probability.
+
+**What it produces:** A `gnn_probability` score for each material, between 0
+and 1, representing the model's confidence that the material is altermagnetic.
+
+**Where it lives:** `external/MatAltMag/` (cloned, not edited).
+Inference is reproduced via `src/mataltmag_hybrid/gnn/reproduce_inference.py`.
+
+---
+
+### 3.2 GNN Embedding Extraction
+
+**What it is:** The same GNN, used purely as a feature extractor with its
+weights frozen (not updated during training).
+
+**How it works:** Instead of taking the final classification probability, a
+hook is registered on the layer just before the classification head. This
+captures the 512-dimensional internal representation — the crystal fingerprint
+— before it is converted to a probability. This vector encodes structural
+information the GNN learned during its original training.
+
+**What it produces:** A 512-dimensional embedding vector per material,
+saved as `data/interim/gnn_embeddings.parquet` with columns
+`emb_000` through `emb_511`.
+
+**Where it lives:** `src/mataltmag_hybrid/gnn/extract_embeddings.py`.
+
+**Why freeze it:** Freezing prevents the training of the hybrid model from
+distorting the GNN's learned representations. The GNN is treated as a
+pre-trained expert whose knowledge is borrowed, not overwritten.
+
+---
+
+### 3.3 Explicit Feature Engineering
+
+**What it is:** Three families of human-designed, physics-motivated features
+computed directly from the crystal structure and database metadata.
+
+**Why it matters:** The GNN learns patterns implicitly from the crystal graph
+but has no guaranteed awareness of the specific symmetry conditions that make
+altermagnetism possible. These explicit features inject that domain knowledge
+directly.
+
+#### Symmetry Features (`src/mataltmag_hybrid/features/symmetry.py`)
+
+Computed from the CIF file using pymatgen's `SpacegroupAnalyzer`:
+
+- Space group number and crystal system
+- `has_inversion`: whether the space group contains an inversion centre.
+  This is the single most important feature — altermagnetism is
+  symmetry-forbidden in centrosymmetric space groups.
+- Counts of rotation operations (2-fold, 3-fold, 4-fold, 6-fold)
+- Number of magnetic sites and their Wyckoff letter distribution
+- Flags for magnetic atom pairs related by inversion vs rotation
+
+#### Composition Features (`src/mataltmag_hybrid/features/composition.py`)
+
+Computed from the chemical formula:
+
+- Fraction of 3d transition metals (Mn, Fe, Co, Ni, Cr)
+- Fraction of 4f rare earth elements
+- Mean and spread of atomic number, electronegativity, covalent radius
+- Stoichiometric entropy and formula complexity
+
+#### Stability Features (`src/mataltmag_hybrid/features/stability.py`)
+
+Fetched from the Materials Project cache:
+
+- Formation energy per atom
+- Energy above the convex hull (key stability indicator)
+- Band gap and density
+
+**What it produces:** `data/interim/explicit_features.parquet`.
+
+**Where it lives:** `src/mataltmag_hybrid/features/featurize_all.py` runs all
+three and merges them into one table.
+
+---
+
+### 3.4 The Hybrid Model (`src/mataltmag_hybrid/models/train_hybrid.py`)
+
+**What it is:** A lightweight ensemble of classifiers trained on top of the
+concatenated GNN embedding and explicit features.
+
+**How it works:** Five model variants are trained and compared:
+
+| Model name | Features used |
+|---|---|
+| `gnn_probability_only` | Original GNN score as a single feature |
+| `explicit_features_only` | Symmetry + composition + stability only |
+| `gnn_embedding_only` | 512-dim frozen GNN embedding only |
+| `hybrid_concatenation` | GNN embedding + explicit features combined |
+| `calibrated_hybrid_ensemble` | Same as above with probability calibration |
+
+Each variant is evaluated on two split types:
+
+- `stratified`: standard random train/test split with class balancing
+- `chemical_system_grouped`: held-out chemical families to test
+  generalisation beyond near-duplicate chemistries
+
+The final model saved to disk is the `calibrated_hybrid_ensemble` trained on
+all labeled data, using `ExtraTreesClassifier` wrapped in
+`CalibratedClassifierCV` (Platt scaling) to ensure probability scores are
+well-calibrated for ranking.
+
+**Key metrics reported:** AUROC, AUPRC, balanced accuracy, Brier score,
+precision@K, recall@K, enrichment@K.
+
+**Important caveat:** The AUROC on the stratified split was ~0.9999, which
+strongly suggests data leakage from near-duplicate chemistries. The grouped
+split metric is the more honest performance estimate. This is documented as a
+known limitation and motivates the interpretability analysis.
+
+**Where it lives:** `src/mataltmag_hybrid/models/train_hybrid.py`.
+
+---
+
+### 3.5 Candidate Ranking (`src/mataltmag_hybrid/models/predict_candidates.py`)
+
+**What it is:** The trained hybrid model applied to all 41,749 unconfirmed
+candidate materials to produce a ranked list for DFT validation.
+
+**How it works:**
+
+1. Loads `candidate_dataset.parquet` (41,749 materials with all features).
+2. Scores each material with the trained model.
+3. Applies a hard centrosymmetry filter using the space group number — all
+   materials whose space group has inversion symmetry are excluded from the
+   top of the ranking (altermagnetism is symmetry-forbidden for these).
+4. Computes a composite DFT priority score:
+
+```
+dft_priority_score =
+    0.45 × hybrid_probability
+  + 0.20 × gnn_probability
+  + 0.15 × stability_score      (from energy above hull)
+  + 0.10 × simplicity_score     (fewer magnetic sites = faster DFT)
+  - 0.10 × hull_penalty         (penalise hull > 0.1 eV/atom)
+```
+
+5. Cross-references Gao et al.'s 381-row `Candidate_for_DFT_validate.csv`
+   shortlist and flags those materials.
+6. Writes `results/candidates/ranked_candidates.csv` with 41,749 rows.
+
+**Centrosymmetric space groups excluded from top ranking:**
+SG 2, 10–15, 47–74, 83–88, 123–142, 147–148, 162–167, 175–176,
+191–194, 200–206, 221–230 (68 space groups total).
+
+Of 41,749 candidates, approximately 23,500 are centrosymmetric and are
+ranked below all eligible candidates regardless of model score. This is a
+hard physics constraint, not a soft preference.
+
+**Where it lives:** `src/mataltmag_hybrid/models/predict_candidates.py`.
+
+---
+
+### 3.6 DFT Input Generation (`src/mataltmag_hybrid/dft/make_vasp_inputs.py`)
+
+**What it is:** Automated generation of VASP input files for the top
+candidates selected for DFT validation.
+
+**How it works:** For each selected candidate:
+
+1. Loads the crystal structure from the CIF file.
+2. Checks for inversion symmetry using pymatgen — skips centrosymmetric
+   structures with a clear error message.
+3. Generates a collinear AFM MAGMOM string by alternating +/− moments on
+   magnetic sites and assigning small seed moments to non-magnetic atoms.
+4. Builds a DFT+U block (LDAU) for correlated elements (Mn, Fe, Co, Ni,
+   Cr, rare earths) using standard Dudarev U values.
+5. Generates a proper KPOINTS file for the bands stage using
+   `pymatgen.symmetry.bandstructure.HighSymmKpath`, with five additional
+   generic off-symmetry k-points appended for spin-splitting detection.
+6. Writes static and bands INCARs with `ISPIN=2`, `ISYM=0`, `NUPDOWN=0`,
+   `ISTART=0`, `ICHARG=2`.
+
+**Where it lives:** `src/mataltmag_hybrid/dft/make_vasp_inputs.py`.
+
+---
+
+### 3.7 Band Splitting Analysis (`src/mataltmag_hybrid/dft/band_split_analysis.py`)
+
+**What it is:** Post-processing script that reads VASP EIGENVAL output and
+quantifies spin splitting at every k-point near the Fermi level.
+
+**How it works:**
+
+1. Parses EIGENVAL to extract spin-up and spin-down band energies at each
+   k-point.
+2. Reads the Fermi energy from OUTCAR.
+3. For each k-point, computes the maximum and mean energy difference between
+   spin-up and spin-down bands within a 2 eV window around the Fermi level.
+4. Reports the net magnetisation from the static OUTCAR to confirm AFM
+   ground state.
+
+**Altermagnetic signature to look for:**
+- Spin splitting > 50 meV at the generic off-symmetry k-points
+- Spin splitting ≈ 0 at standard high-symmetry points (Γ, X, M, etc.)
+- Net magnetisation < 0.5 μB (confirms AFM, not ferromagnetic)
+
+**Where it lives:** `src/mataltmag_hybrid/dft/band_split_analysis.py`.
+
+---
+
+## 4. Repository Layout
 
 ```text
 mataltmag-hybrid/
@@ -34,11 +294,11 @@ mataltmag-hybrid/
 │   ├── train.yaml
 │   └── dft.yaml
 ├── external/
-│   └── MatAltMag/                    # cloned Gao et al. repository; not edited directly
+│   └── MatAltMag/
 ├── data/
 │   ├── raw/
-│   │   ├── mataltmag/                # label0.csv, label1.csv, candidate.csv, CIFs, atom_init.json
-│   │   └── materials_project/        # MP summary metadata cache
+│   │   ├── mataltmag/          # label0.csv, label1.csv, candidate.csv, CIFs
+│   │   └── materials_project/  # MP summary metadata cache
 │   ├── interim/
 │   │   ├── gnn_outputs.csv
 │   │   ├── gnn_embeddings.parquet
@@ -46,16 +306,10 @@ mataltmag-hybrid/
 │   │   └── dataset_index.parquet
 │   └── processed/
 │       ├── train_dataset.parquet
-│       ├── candidate_dataset.parquet
+│       ├── candidate_dataset.parquet    # 41,749 candidates with all features
 │       └── feature_schema.json
 ├── src/
 │   └── mataltmag_hybrid/
-│       ├── __init__.py
-│       ├── config.py
-│       ├── io/
-│       │   ├── load_mataltmag.py
-│       │   ├── materials_project.py
-│       │   └── cache.py
 │       ├── gnn/
 │       │   ├── adapter.py
 │       │   ├── extract_embeddings.py
@@ -70,7 +324,7 @@ mataltmag-hybrid/
 │       │   ├── split.py
 │       │   ├── train_hybrid.py
 │       │   ├── calibrate.py
-│       │   ├── predict_candidates.py
+│       │   ├── predict_candidates.py   # scores all 41,749 candidates
 │       │   └── baselines.py
 │       ├── analysis/
 │       │   ├── metrics.py
@@ -79,96 +333,68 @@ mataltmag-hybrid/
 │       │   ├── shap_analysis.py
 │       │   └── report_tables.py
 │       └── dft/
-│           ├── select_candidates.py
-│           ├── make_vasp_inputs.py
+│           ├── select_candidates.py    # centrosymmetry filter
+│           ├── make_vasp_inputs.py     # MAGMOM + LDAU + KPOINTS generation
 │           ├── parse_vasp_outputs.py
-│           └── band_split_analysis.py
-├── notebooks/
-│   ├── 01_reproduce_mataltmag.ipynb
-│   ├── 02_feature_audit.ipynb
-│   ├── 03_model_eval.ipynb
-│   ├── 04_candidate_ranking.ipynb
-│   ├── 05_interpretability.ipynb
-│   └── 06_dft_figures.ipynb
-├── scripts/
-│   ├── 00_clone_mataltmag.sh
-│   ├── 01_prepare_data.sh
-│   ├── 02_extract_gnn.sh
-│   ├── 03_featurize.sh
-│   ├── 04_train.sh
-│   ├── 05_rank_candidates.sh
-│   ├── 06_make_dft_inputs.sh
-│   └── 07_make_report_assets.sh
+│           └── band_split_analysis.py  # EIGENVAL parser + splitting metrics
 ├── results/
 │   ├── metrics/
 │   ├── figures/
 │   ├── candidates/
-│   │   ├── ranked_candidates.csv
-│   │   ├── top_candidates_for_dft.csv
+│   │   ├── ranked_candidates.csv       # 41,749 rows, all candidates scored
+│   │   ├── top_candidates_for_dft.csv  # final 3 selected candidates
+│   │   ├── inversion_audit.csv         # centrosymmetry audit of full list
 │   │   └── candidate_cards.md
 │   └── dft/
-│       ├── candidate_001/
-│       ├── candidate_002/
-│       └── candidate_003/
-├── tests/
-│   ├── test_features.py
-│   ├── test_gnn_adapter.py
-│   ├── test_model_training.py
-│   └── test_candidate_ranking.py
+│       ├── candidate_001_mp-1189260/   # Nb6Cr2S12,   SG 182
+│       ├── candidate_002_mp-1208846/   # Sr4Co2Si4O14, SG 113
+│       └── candidate_003_mp-1227180/   # Ca2Lu2Mn4O12, SG 26
 └── report/
-    ├── main.tex or main.md
-    ├── figures/
-    └── tables/
 ```
 
-## 4. Environment
+---
 
-Recommended starting environment:
+## 5. Environment
 
 ```bash
 conda create -n mataltmag-hybrid python=3.10 -y
 conda activate mataltmag-hybrid
-pip install torch==2.0.1 accelerate==0.20.0 pymatgen PyYAML tqdm pandas numpy scikit-learn scipy matplotlib seaborn shap umap-learn pyarrow mp-api matminer joblib typer rich pytest
+pip install -e .
+pip install torch==2.0.1 pymatgen PyYAML tqdm pandas numpy scikit-learn \
+    scipy matplotlib seaborn shap umap-learn pyarrow mp-api matminer \
+    joblib typer rich pytest
 ```
 
-Notes:
+Install the package in editable mode before running any scripts:
 
-- Use the MatAltMag versions where needed for reproduction.
-- Do not commit Materials Project API keys, VASP outputs with licensed pseudopotentials, or large checkpoint files.
-- Store secrets in environment variables, for example `MP_API_KEY`.
+```bash
+pip install -e .
+```
 
-## 5. Data contract
+Do not commit Materials Project API keys, VASP outputs with licensed
+pseudopotentials, or large checkpoint files. Store secrets as environment
+variables, for example `MP_API_KEY`.
 
-Expected raw files from MatAltMag:
+---
+
+## 6. Data Contract
 
 ```text
 data/raw/mataltmag/
 ├── atom_init.json
-├── label0.csv                         # non-altermagnetic labels
-├── label1.csv                         # known altermagnetic positives
-├── candidate.csv                      # candidate set used by Gao et al.
-├── Candidate_for_DFT_validate.csv      # ~300 unconfirmed high-probability candidates
-├── output.csv                         # original MatAltMag predictions, if available
-└── cifs/
-    ├── mp-xxxx.cif
-    └── ...
+├── label0.csv                          # non-altermagnetic labels
+├── label1.csv                          # known altermagnetic positives
+├── candidate.csv                       # 42,523 candidate materials
+├── Candidate_for_DFT_validate.csv      # 381 Gao et al. high-priority candidates
+├── output.csv                          # original MatAltMag predictions
+└── cifs/                               # 62,968 CIF files (mp-XXXXX.cif)
 ```
 
-The canonical index table should have at least:
+---
 
-```text
-material_id, formula, source_split, label, is_candidate, gnn_probability
-```
+## 7. Pipeline
 
-where:
-
-- `source_split = label0 | label1 | confirmed_50 | unconfirmed_candidate`
-- `label = 0 | 1 | unknown`
-- `is_candidate = true | false`
-
-## 6. Pipeline
-
-### Step 1: Reproduce MatAltMag inference
+### Step 1 — Reproduce MatAltMag inference
 
 ```bash
 python -m mataltmag_hybrid.gnn.reproduce_inference \
@@ -177,20 +403,7 @@ python -m mataltmag_hybrid.gnn.reproduce_inference \
   --out data/interim/gnn_outputs.csv
 ```
 
-Expected output:
-
-```text
-data/interim/gnn_outputs.csv
-material_id, gnn_probability, gnn_rank, source_file
-```
-
-Validation checks:
-
-- Material IDs match MatAltMag candidate inputs.
-- Candidate probabilities approximately match `out/output.csv` or `Candidate_for_DFT_validate.csv` if those files contain scores.
-- The original top-ranked candidates remain top-ranked after reproduction.
-
-### Step 2: Extract frozen GNN embeddings
+### Step 2 — Extract frozen GNN embeddings
 
 ```bash
 python -m mataltmag_hybrid.gnn.extract_embeddings \
@@ -198,19 +411,7 @@ python -m mataltmag_hybrid.gnn.extract_embeddings \
   --out data/interim/gnn_embeddings.parquet
 ```
 
-Implementation options:
-
-1. Preferred: add a non-invasive wrapper around MatAltMag model that returns the pooled crystal representation before the classifier head.
-2. Backup: register a PyTorch forward hook on the classifier input layer and save the tensor passed into the head.
-3. Last resort: fork `model.py` into this repository and add `return_embedding=True` while keeping the original output path unchanged.
-
-Expected output:
-
-```text
-material_id, emb_000, emb_001, ..., emb_N
-```
-
-### Step 3: Compute explicit features
+### Step 3 — Compute explicit features
 
 ```bash
 python -m mataltmag_hybrid.features.featurize_all \
@@ -218,77 +419,7 @@ python -m mataltmag_hybrid.features.featurize_all \
   --out data/interim/explicit_features.parquet
 ```
 
-Feature groups:
-
-#### Symmetry features
-
-- Space group number.
-- Crystal system.
-- Point group symbol.
-- Centrosymmetric flag.
-- Presence/count of inversion operations.
-- Presence/count of 2-fold, 3-fold, 4-fold, and 6-fold rotations.
-- Presence/count of mirror operations.
-- Number of symmetry-equivalent magnetic sites.
-- Number of inequivalent magnetic sites.
-- Magnetic atom Wyckoff-letter distribution.
-- Primitive-cell atom count.
-- Conventional-cell atom count.
-- Magnetic atoms per primitive cell.
-- Heuristic flags for pairs of magnetic atoms related by inversion, translation, rotation, or mirror.
-- Exclusion flags such as `is_P1_or_Pminus1`.
-
-#### Composition features
-
-- Number of elements.
-- Stoichiometric entropy.
-- Fraction of 3d transition metals.
-- Fraction of 4f rare earths.
-- Magnetic element count.
-- Magnetic element identity one-hot or multi-hot.
-- Mean/std/min/max of atomic number, atomic mass, electronegativity, covalent radius.
-- Magpie-style elemental statistics.
-- Formula complexity metrics.
-
-#### Materials Project metadata
-
-- Formation energy per atom.
-- Energy above hull.
-- Band gap.
-- Density.
-- Volume per atom.
-- Theoretical/experimental flag if available.
-- Number of sites.
-
-Expected output:
-
-```text
-material_id, sg_number, crystal_system_*, has_inversion, n_magnetic_sites, tm_3d_fraction, rare_earth_fraction, e_above_hull, band_gap, ...
-```
-
-### Step 4: Build train/validation/test splits
-
-```bash
-python -m mataltmag_hybrid.models.split \
-  --labels data/processed/train_dataset.parquet \
-  --out data/processed/splits.json
-```
-
-Rules:
-
-- Use only labeled data for model training and validation.
-- Do not train on the ~300 unconfirmed candidates.
-- Keep a fixed random seed and save split IDs.
-- Use stratified splits because positives are scarce.
-- Add a grouped split by formula prototype or chemical system if possible, to check whether the model generalizes beyond near-duplicate chemistries.
-
-Recommended evaluation sets:
-
-1. `cv_random`: stratified repeated K-fold.
-2. `cv_grouped`: grouped by reduced formula or chemical system.
-3. `external_confirmed_50`: optional external test set from Gao et al.'s newly confirmed 50 materials, if curated cleanly and not already included in training labels.
-
-### Step 5: Train baselines and hybrid ensemble
+### Step 4 — Train hybrid model
 
 ```bash
 python -m mataltmag_hybrid.models.train_hybrid \
@@ -296,233 +427,259 @@ python -m mataltmag_hybrid.models.train_hybrid \
   --out results/metrics/model_summary.json
 ```
 
-Models to train:
-
-1. `published_gnn`: original MatAltMag probability only.
-2. `explicit_only`: symmetry + composition + MP metadata features.
-3. `embedding_only`: frozen GNN embedding only.
-4. `hybrid_concat`: frozen GNN embedding + explicit features.
-5. `hybrid_ensemble`: averaged calibrated predictions from multiple models.
-
-Recommended ensemble members:
-
-- Balanced logistic regression.
-- Random forest or extra-trees classifier.
-- Histogram gradient boosting classifier.
-- Small MLP classifier on scaled features.
-
-Class imbalance handling:
-
-- Use `class_weight="balanced"` where supported.
-- Report average precision and precision@K, not only accuracy.
-- Use calibration curves because candidate ranking depends on probability quality.
-
-Main metrics:
-
-```text
-AUROC, AUPRC, balanced_accuracy, F1, recall@K, precision@K, enrichment@K, Brier score, expected calibration error
-```
-
-Success criterion:
-
-- Hybrid model is at least not worse than original GNN on held-out positives.
-- Ideally hybrid improves AUPRC, recall@K, or enrichment@K.
-- If performance is statistically indistinguishable, use hybrid model as a ranking aid and pivot the paper toward interpretability.
-
-### Step 6: Rank unconfirmed candidates
+### Step 5 — Rank all 41,749 candidates
 
 ```bash
 python -m mataltmag_hybrid.models.predict_candidates \
-  --candidates data/processed/candidate_dataset.parquet \
-  --model-dir results/models/latest \
-  --out results/candidates/ranked_candidates.csv
+  --config configs/train.yaml
 ```
 
-Required columns:
+This scores all candidates, applies the centrosymmetry filter using space
+group numbers, cross-references Gao et al.'s 381-row shortlist, and writes
+`results/candidates/ranked_candidates.csv`.
 
-```text
-rank_hybrid, material_id, formula, space_group_number, crystal_system,
-gnn_probability, hybrid_probability, hybrid_probability_std,
-explicit_only_probability, embedding_only_probability,
-formation_energy_per_atom, energy_above_hull, band_gap,
-n_magnetic_sites, magnetic_elements, dft_priority_score, dft_selected, rationale
-```
-
-Recommended ranking formula:
-
-```text
-dft_priority_score =
-    0.45 * calibrated_hybrid_probability
-  + 0.20 * calibrated_gnn_probability
-  + 0.15 * stability_score
-  + 0.10 * simplicity_score
-  + 0.10 * diversity_score
-  - 0.10 * uncertainty_penalty
-```
-
-Candidate selection rules for DFT:
-
-- Prefer high hybrid probability and high GNN probability.
-- Prefer low energy above hull.
-- Prefer simple cells and 3d magnetic elements over complex 4f-heavy systems for speed.
-- Avoid selecting three near-duplicates from the same chemistry family.
-- Avoid materials already confirmed in Gao et al.'s table unless using them as sanity checks.
-
-### Step 7: Prepare DFT validation inputs
+### Step 6 — Generate DFT inputs
 
 ```bash
-python -m mataltmag_hybrid.dft.select_candidates \
-  --ranked results/candidates/ranked_candidates.csv \
-  --top-n 3 \
-  --out results/candidates/top_candidates_for_dft.csv
-
-python -m mataltmag_hybrid.dft.make_vasp_inputs \
-  --candidates results/candidates/top_candidates_for_dft.csv \
-  --config configs/dft.yaml \
-  --out results/dft/
+python -m mataltmag_hybrid.dft.make_vasp_inputs --config configs/dft.yaml
 ```
 
-For each selected material, create:
+### Step 7 — Run VASP on DFT server (two-stage, no relax)
 
-```text
-results/dft/candidate_001/
-├── metadata.yaml
-├── POSCAR
-├── POTCAR.placeholder.txt
-├── relax/
-│   ├── INCAR
-│   ├── KPOINTS
-│   └── run.sh
-├── static/
-│   ├── INCAR
-│   ├── KPOINTS
-│   └── run.sh
-├── bands/
-│   ├── INCAR
-│   ├── KPOINTS
-│   └── run.sh
-└── analysis/
-    ├── parse_band_split.py
-    └── expected_outputs.md
+Since Materials Project structures are pre-relaxed at the PBE level, the
+relax stage is skipped. The workflow is:
+
+```
+MP POSCAR → Static (SCF, ICHARG=2) → copy CHGCAR → Bands (non-SCF, ICHARG=11)
 ```
 
-DFT validation logic:
+Submit static first. After convergence, copy CHGCAR to the bands folder,
+then submit bands.
 
-1. Start from Materials Project relaxed structure.
-2. Generate plausible collinear AFM orderings on magnetic atoms.
-3. Run spin-polarized calculations without SOC.
-4. Confirm near-zero net magnetization for the AFM state.
-5. Run static self-consistent calculation.
-6. Run non-self-consistent band calculation on a high-symmetry path using the converged density.
-7. Inspect spin-resolved bands for non-degenerate spin-up/spin-down bands at generic k-points.
-8. Save band plots and quantitative spin-splitting values.
-
-### Step 8: Interpretability fallback
-
-Run this regardless of whether the hybrid model wins, but make it the central thesis if the hybrid model does not beat the original GNN.
+### Step 8 — Analyse band splitting
 
 ```bash
-python -m mataltmag_hybrid.analysis.shap_analysis \
-  --model-dir results/models/latest \
-  --out results/figures/shap_summary.png
-
-python -m mataltmag_hybrid.analysis.embedding_plots \
-  --embeddings data/interim/gnn_embeddings.parquet \
-  --features data/interim/explicit_features.parquet \
-  --out results/figures/embedding_umap.png
+# After copying EIGENVAL and OUTCAR back from the DFT server
+for cand in results/dft/candidate_*/; do
+    python -m mataltmag_hybrid.dft.band_split_analysis --dft-dir "$cand"
+done
 ```
 
-Interpretability questions:
+---
 
-- Do known positives cluster in the frozen GNN embedding space?
-- Does the GNN separate materials by magnetic element, space group, or chemical family?
-- Can explicit features predict the original GNN probability?
-- Which explicit features explain hybrid probability?
-- Are high-probability candidates enriched in specific space groups or magnetic-element families?
+## 8. DFT Validation
 
-## 7. Report outputs
+### INCAR settings
+
+All calculations use:
+
+| Tag | Value | Reason |
+|---|---|---|
+| ISPIN | 2 | Spin-polarised calculation |
+| ISYM | 0 | Disable symmetry — required for AFM spin channels |
+| NUPDOWN | 0 | Constrain net moment to zero — enforces AFM state |
+| ISTART | 0 | Start from scratch, no WAVECAR |
+| ICHARG | 2 (static) / 11 (bands) | Build charge from atoms / read from CHGCAR |
+| LDAUTYPE | 2 | Dudarev GGA+U scheme |
+| LMAXMIX | 4 | Required for d-electron DFT+U |
+
+### DFT+U values used
+
+| Element | U (eV) | l |
+|---|---|---|
+| Cr | 3.7 | 2 (d) |
+| Mn | 3.9 | 2 (d) |
+| Fe | 5.3 | 2 (d) |
+| Co | 3.32 | 2 (d) |
+| Ni | 6.45 | 2 (d) |
+| Er | 8.0 | 3 (f) |
+
+### KPOINTS
+
+- Static: 8×8×8 Gamma-centred mesh
+- Bands: full high-symmetry path from `pymatgen.symmetry.bandstructure.HighSymmKpath`
+  plus five generic off-symmetry k-points for spin-splitting detection:
+  [0.10,0.20,0.30], [0.15,0.35,0.10], [0.22,0.11,0.44],
+  [0.33,0.17,0.28], [0.41,0.29,0.13]
+
+Generic k-points are essential — altermagnetic spin splitting is
+symmetry-forced to zero at all standard high-symmetry points and only
+non-zero at generic positions in the Brillouin zone.
+
+### Convergence checks before proceeding to bands
+
+```bash
+# Must print at least one line
+grep "reached required accuracy" static/OUTCAR
+
+# Net moment must be < 0.5 μB
+grep "number of electron" static/OUTCAR | tail -3
+
+# Magnetic atoms must show alternating non-zero moments
+grep "magnetization (x)" static/OUTCAR | tail -25
+```
+
+---
+
+## 9. Key Fixes and Design Decisions
+
+### 9.1 Centrosymmetry filter
+
+**Problem:** The original pipeline ranked centrosymmetric materials (SG 14,
+15, 74) as top candidates. Altermagnetism is symmetry-forbidden in all 68
+centrosymmetric space groups — any AFM ordering in these materials produces
+degenerate spin-up/down bands with no splitting.
+
+**Fix:** Hard filter in `select_candidates.py` and `predict_candidates.py`
+using the canonical set of 68 centrosymmetric space group numbers. The
+`has_inversion` column in `candidate_dataset.parquet` was found to be all-False
+(computed incorrectly during featurisation) and is not used. Space group number
+lookup is used instead.
+
+### 9.2 MAGMOM not set in original INCARs
+
+**Problem:** The original `make_vasp_inputs.py` generated INCARs without a
+MAGMOM tag. VASP defaulted to ferromagnetic ordering with moment = 1 μB,
+never producing the intended AFM state.
+
+**Fix:** MAGMOM is now generated per-material by iterating through the
+structure and assigning alternating +/− moments on magnetic sites with
+small seed moments (0.6 μB) on non-magnetic atoms. `NUPDOWN = 0` is added
+to constrain net moment to zero throughout SCF.
+
+### 9.3 Band KPOINTS was a placeholder
+
+**Problem:** The bands KPOINTS file contained the literal string "Line mode
+path placeholder; replace with pymatgen high-symmetry path." VASP either
+errored or produced meaningless results.
+
+**Fix:** `pymatgen.symmetry.bandstructure.HighSymmKpath` now generates the
+correct symmetry path automatically from the structure, with five generic
+k-points appended.
+
+### 9.4 band_split_analysis.py was empty
+
+**Problem:** The analysis script contained only a docstring. No spin
+splitting was ever measured.
+
+**Fix:** Full implementation parsing EIGENVAL and OUTCAR, reporting
+per-k-point maximum and mean spin splitting in eV near the Fermi level.
+
+### 9.5 predict_candidates.py only scored 3 materials
+
+**Problem:** The original script only scored the 3 pre-selected candidates
+instead of the full 41,749-row candidate pool.
+
+**Fix:** Complete rewrite scoring all candidates, applying the centrosymmetry
+filter, cross-referencing Gao et al.'s shortlist, and computing the composite
+DFT priority score.
+
+### 9.6 AUROC of 0.9999 — data leakage
+
+**Observation:** The stratified split AUROC of ~0.9999 is almost certainly
+due to near-duplicate chemistries split across train and test sets. The
+grouped split by chemical system gives a more honest estimate.
+
+**Status:** Documented as a known limitation. The grouped split metric is
+the one cited in the report. The model is used for ranking, not for
+absolute probability claims.
+
+---
+
+## 10. Final DFT Candidates
+
+Three candidates selected after centrosymmetry filtering, ranked by DFT
+priority score. All are in Gao et al.'s 381-row shortlist.
+
+| # | Material ID | Formula | SG | SG Symbol | Magnetic Element | Hull (eV/atom) |
+|---|---|---|---|---|---|---|
+| 1 | mp-1189260 | Nb6Cr2S12 | 182 | P6₃22 | Cr (±5.0 μB) | 0.000 |
+| 2 | mp-1208846 | Sr4Co2Si4O14 | 113 | P-42₁m | Co (±3.0 μB) | 0.000 |
+| 3 | mp-1227180 | Ca2Lu2Mn4O12 | 26 | Pmc2₁ | Mn (±4.0 μB) | 0.027 |
+
+**Why these three:**
+
+- **mp-1189260 (SG 182):** Chiral hexagonal space group with 6₃ screw and
+  2-fold rotation axes. These rotations can relate the two Cr sublattices,
+  satisfying the core symmetry requirement for altermagnetism. Cr in
+  sulphide environments carries well-defined moments. On the convex hull.
+
+- **mp-1208846 (SG 113):** Tetragonal non-centrosymmetric space group with
+  improper -4 axis and 2₁ screw. Co is a reliable 3d magnetic element with
+  well-converging DFT+U. On the convex hull.
+
+- **mp-1227180 (SG 26):** Orthorhombic polar space group with a 2₁ screw
+  axis — a rotation operation sufficient to relate two Mn sublattices. Mn
+  in oxide environments gives large, stable moments (4 μB) and converges
+  reliably with U = 3.9 eV.
+
+**Candidates excluded from top 3 and why:**
+
+| SG | Example | Reason excluded |
+|---|---|---|
+| 14, 15, 74 | mp-6294, mp-562216, mp-1205353 | Centrosymmetric — altermagnetism forbidden |
+| 1 (P1) | mp-1283659, mp-1274129 | No symmetry operations — no protected sublattice relation |
+| 6 (Pm) | mp-1227194, mp-1305431 | Mirror only — no rotation axis to relate sublattices |
+
+---
+
+## 11. Report Outputs
 
 Required figures:
 
-1. Full workflow diagram.
-2. Data split diagram.
-3. Model comparison table.
-4. ROC and precision-recall curves.
-5. Calibration curve.
-6. UMAP/t-SNE embedding plot.
-7. SHAP/permutation feature-importance plot.
-8. Top candidate ranking table.
-9. DFT band structures for selected candidates.
-10. Spin-splitting plot or table at generic k-points.
+1. Full workflow diagram
+2. Data split diagram (stratified vs grouped)
+3. Model comparison table (5 model variants × 2 split types)
+4. ROC and precision-recall curves
+5. Calibration curve
+6. UMAP/t-SNE embedding plot coloured by label and chemical family
+7. SHAP/permutation feature-importance plot
+8. Top candidate ranking table with centrosymmetry annotation
+9. DFT band structures for selected candidates
+10. Spin-splitting values at generic k-points
 
 Suggested report structure:
 
-```text
+```
 1. Introduction
 2. Background: altermagnetism and MatAltMag
 3. Data and reproduction of Gao et al. inference
 4. Hybrid feature design
 5. Model training and evaluation
-6. Candidate ranking
+6. Candidate ranking and symmetry filtering
 7. DFT validation of top candidates
 8. Interpretability and failure analysis
 9. Conclusion
 ```
 
-## 8. Reproducibility checklist
+---
 
-Before considering the project complete, verify:
+## 12. Reproducibility Checklist
 
-- [ ] Raw data sources are documented.
-- [ ] All train/test split IDs are saved.
-- [ ] MatAltMag inference is reproduced or discrepancy is explained.
-- [ ] Embeddings are exported with fixed checkpoint hash.
-- [ ] Explicit feature schema is saved.
-- [ ] Candidate ranking CSV has both GNN and hybrid probabilities.
-- [ ] Model metrics include confidence intervals across folds.
-- [ ] Top DFT candidates have candidate cards with selection rationale.
-- [ ] VASP input folders are generated reproducibly.
-- [ ] Band-splitting analysis script parses outputs without manual editing.
-- [ ] Report figures are regenerated by one command.
+- [ ] Raw data sources documented
+- [ ] All train/test split IDs saved to `data/processed/splits.json`
+- [ ] MatAltMag inference reproduced or discrepancy explained
+- [ ] Embeddings exported with fixed checkpoint hash
+- [ ] Explicit feature schema saved to `data/processed/feature_schema.json`
+- [ ] Centrosymmetry audit saved to `results/candidates/inversion_audit.csv`
+- [ ] Candidate ranking CSV has both GNN and hybrid probabilities for all 41,749 candidates
+- [ ] Model metrics include both stratified and grouped split results
+- [ ] Top DFT candidates have candidate cards with selection rationale
+- [ ] VASP INCARs include MAGMOM, ISYM=0, NUPDOWN=0, ISTART=0, ICHARG=2
+- [ ] VASP bands KPOINTS includes generic off-symmetry k-points
+- [ ] Band-splitting analysis run for all three candidates
+- [ ] AUROC leakage documented and grouped-split metric cited in report
 
-## 9. Main commands
+---
 
-```bash
-# Prepare data and reproduce original inference
-bash scripts/01_prepare_data.sh
-bash scripts/02_extract_gnn.sh
+## 13. Citation Note
 
-# Compute explicit features
-bash scripts/03_featurize.sh
+This project extends Gao et al.'s MatAltMag implementation. Cite the
+original National Science Review paper and the MatAltMag GitHub repository
+in the report and README of any public derivative repository.
 
-# Train and evaluate hybrid model
-bash scripts/04_train.sh
-
-# Rank unconfirmed candidates
-bash scripts/05_rank_candidates.sh
-
-# Prepare DFT inputs for top candidates
-bash scripts/06_make_dft_inputs.sh
-
-# Generate report figures/tables
-bash scripts/07_make_report_assets.sh
 ```
-
-## 10. Definition of done
-
-Minimum useful completion:
-
-- Working pipeline from MatAltMag inputs to ranked candidate CSV.
-- Reproduced original GNN probabilities or documented mismatch.
-- Hybrid model trained and compared against original GNN.
-- Candidate list with original and hybrid probabilities.
-- Clear top two or three DFT candidates with rationale.
-- Report draft with model results, figures, and either DFT validation or interpretability fallback.
-
-Stretch completion:
-
-- At least one unconfirmed candidate shows non-relativistic spin splitting in spin-polarized no-SOC DFT band structure and near-zero net magnetic moment.
-
-## 11. Citation note
-
-This project extends Gao et al.'s MatAltMag implementation. Cite the original National Science Review paper and the MatAltMag GitHub repository in the report and README of any public derivative repository.
+Gao et al., "High-throughput identification of altermagnetic materials"
+National Science Review, 2024.
+https://github.com/Junwen-MX/MatAltMag
+```
