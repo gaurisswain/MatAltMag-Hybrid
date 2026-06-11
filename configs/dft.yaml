@@ -1,0 +1,5 @@
+ranked_candidates: results/candidates/ranked_candidates.csv
+top_candidates: results/candidates/top_candidates_for_dft.csv
+output_dir: results/dft
+n_select: 3
+

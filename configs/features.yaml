@@ -1,0 +1,6 @@
+paths_config: configs/paths.yaml
+materials_project_cache: data/raw/materials_project/mp_summary.csv
+allow_missing_mp_cache: true
+feature_schema: data/processed/feature_schema.json
+quality_report: results/metrics/feature_quality_report.csv
+

@@ -1,0 +1,4 @@
+rank_hybrid,material_id,formula,space_group_number,crystal_system,gnn_probability,hybrid_probability,hybrid_probability_std,explicit_only_probability,embedding_only_probability,formation_energy_per_atom,energy_above_hull,band_gap,n_magnetic_sites,magnetic_elements,dft_priority_score,dft_selected,rationale
+1,mp-1205353,K4 Mn4 F12,74,orthorhombic,0.9997709393501282,0.9984756610382677,0.0,0.9984756610382677,0.9984756610382677,-3.016103159036205,0.0,2.4058,4,Mn,0.9984756610382677,True,hybrid=0.998; hull=0.0; magnetic=Mn
+2,mp-6294,Sr4 Er2 Ru2 O12,14,monoclinic,1.0,0.998301333290473,0.0,0.998301333290473,0.998301333290473,-2.877480758499999,0.0,0.0,2,Er,0.998301333290473,True,hybrid=0.998; hull=0.0; magnetic=Er
+3,mp-562216,Ba8 Co4 Si8 O28,15,monoclinic,0.9999994039535522,0.9980801452310869,0.0,0.9980801452310869,0.9980801452310869,-3.058014943333333,0.001387606666667,1.7828,4,Co,0.9966925385644199,True,hybrid=0.998; hull=0.001387606666667; magnetic=Co

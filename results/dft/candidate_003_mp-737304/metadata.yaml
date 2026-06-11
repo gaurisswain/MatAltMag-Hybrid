@@ -1,0 +1,18 @@
+band_gap: .nan
+crystal_system: orthorhombic
+dft_priority_score: 1.0
+dft_selected: true
+embedding_only_probability: 1.0
+energy_above_hull: .nan
+explicit_only_probability: 1.0
+formation_energy_per_atom: .nan
+formula: Mn36 Si16 O72
+gnn_probability: 0.9999887943267822
+hybrid_probability: 1.0
+hybrid_probability_std: 0.0
+magnetic_elements: Mn
+material_id: mp-737304
+n_magnetic_sites: 36
+rank_hybrid: 3
+rationale: hybrid=1.000; hull=None; magnetic=Mn
+space_group_number: 33

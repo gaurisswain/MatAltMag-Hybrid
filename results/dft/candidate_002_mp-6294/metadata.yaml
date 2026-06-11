@@ -1,0 +1,18 @@
+band_gap: 0.0
+crystal_system: monoclinic
+dft_priority_score: 0.998301333290473
+dft_selected: true
+embedding_only_probability: 0.998301333290473
+energy_above_hull: 0.0
+explicit_only_probability: 0.998301333290473
+formation_energy_per_atom: -2.877480758499999
+formula: Sr4 Er2 Ru2 O12
+gnn_probability: 1.0
+hybrid_probability: 0.998301333290473
+hybrid_probability_std: 0.0
+magnetic_elements: Er
+material_id: mp-6294
+n_magnetic_sites: 2
+rank_hybrid: 2
+rationale: hybrid=0.998; hull=0.0; magnetic=Er
+space_group_number: 14

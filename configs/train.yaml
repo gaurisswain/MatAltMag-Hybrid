@@ -1,0 +1,7 @@
+seed: 20260602
+paths_config: configs/paths.yaml
+model_dir: results/models/latest
+metrics_out: results/metrics/model_comparison.csv
+splits_out: data/processed/splits.json
+minimum_labeled_rows: 4
+

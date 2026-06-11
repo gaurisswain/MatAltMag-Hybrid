@@ -1,0 +1,12 @@
+project_root: .
+mataltmag_root: external/MatAltMag
+raw_mataltmag_dir: data/raw/mataltmag
+raw_mp_dir: data/raw/materials_project
+cif_dir: data/raw/mataltmag/cifs
+dataset_index: data/processed/dataset_index.parquet
+gnn_outputs: data/interim/gnn_outputs.csv
+gnn_embeddings: data/interim/gnn_embeddings.parquet
+explicit_features: data/interim/explicit_features.parquet
+train_dataset: data/processed/train_dataset.parquet
+candidate_dataset: data/processed/candidate_dataset.parquet
+ranked_candidates: results/candidates/ranked_candidates.csv
