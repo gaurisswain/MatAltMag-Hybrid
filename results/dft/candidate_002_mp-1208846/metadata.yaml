@@ -1,0 +1,15 @@
+dft_notes: ISYM=0 mandatory for spin-polarised AFM. MAGMOM alternates +/- on magnetic
+  sites. KPOINTS for bands includes generic k-points for spin-splitting detection.
+  POTCAR must be added manually (not committed due to licensing).
+energy_above_hull: 0.0
+formula: Sr4 Co2 Si4 O14
+gnn_probability: 0.9974164962768556
+has_inversion: false
+hybrid_probability: 0.9366531691251136
+magmom_string: 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 3.0 -3.0 3.0 -3.0 0.6 0.6 0.6 0.6 0.6
+  0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6
+  0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6 0.6
+magnetic_elements: Co
+material_id: mp-1208846
+space_group_number: 113
+space_group_symbol: P-42_1m

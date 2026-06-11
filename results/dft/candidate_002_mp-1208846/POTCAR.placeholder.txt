@@ -1,0 +1,3 @@
+Build POTCAR for mp-1208846 by concatenating PAW PBE pseudopotentials.
+See analysis/README.md for instructions.
+Do NOT commit POTCAR files to the repository.
